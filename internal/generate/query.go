@@ -51,7 +51,8 @@ func (b *QueryStructMeta) parseStruct(st interface{}) error {
 		return err
 	}
 	b.TableName = stmt.Table
-	b.FileName = strings.ToLower(stmt.Table)
+	//b.FileName = strings.ToLower(stmt.Table)
+	b.FileName = stmt.Schema.Name //直接使用结构体名字做gorm gen生成的文件名 FEATURE:增加自定义生成的文件名功能
 
 	var fp FieldParser = dummyFieldParser{}
 	if fps, ok := st.(FieldParser); ok && fps != nil {
