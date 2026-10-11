@@ -22,6 +22,27 @@ const (
 
 var _ = os.Setenv("GORM_DIALECT", "mysql")
 
+type User struct {
+	Id       string    `gorm:"primaryKey"`
+	Posts    []Post    `gorm:"foreignKey:AuthorId"`
+	Comments []Comment `gorm:"foreignKey:AuthorId"`
+}
+
+type Post struct {
+	Id       string `gorm:"primaryKey"`
+	AuthorId string
+	Author   User      `gorm:"foreignKey:Id"`
+	Comments []Comment `gorm:"foreignKey:PostId"`
+}
+
+type Comment struct {
+	Id       string `gorm:"primaryKey"`
+	PostId   string
+	Post     Post `gorm:"foreignKey:Id"`
+	AuthorId string
+	Author   User `gorm:"foreignKey:Id"`
+}
+
 var generateCase = map[string]func(dir string) *gen.Generator{
 	generateDirPrefix + "dal_1": func(dir string) *gen.Generator {
 		g := gen.NewGenerator(gen.Config{
@@ -123,15 +144,13 @@ var generateCase = map[string]func(dir string) *gen.Generator{
 			OutPath: dir + "/query",
 			Mode:    gen.WithDefaultQuery | gen.WithQueryInterface,
 
-			WithUnitTest: true,
-
+			WithUnitTest:      true,
 			FieldNullable:     true,
 			FieldCoverable:    true,
 			FieldWithIndexTag: true,
 		})
 		g.UseDB(DB)
 		g.WithJSONTagNameStrategy(func(c string) string { return "-" })
-
 		banks := g.GenerateModel("banks")
 		creditCards := g.GenerateModel("credit_cards")
 		customers := g.GenerateModel("customers",
@@ -151,6 +170,39 @@ var generateCase = map[string]func(dir string) *gen.Generator{
 			}),
 		)
 		g.ApplyBasic(customers)
+		return g
+	},
+	generateDirPrefix + "dal_generic": func(dir string) *gen.Generator {
+		g := gen.NewGenerator(gen.Config{
+			OutPath: dir + "/query",
+			Mode:    gen.WithDefaultQuery | gen.WithGeneric,
+
+			WithUnitTest: true,
+
+			FieldNullable:     true,
+			FieldCoverable:    true,
+			FieldWithIndexTag: true,
+		})
+		g.UseDB(DB)
+		g.WithJSONTagNameStrategy(func(c string) string { return "-" })
+		g.ApplyBasic(g.GenerateModel("banks"))
+		g.ApplyInterface(func(testIF diy_method.TestIF, testFor diy_method.TestFor, method diy_method.InsertMethod, selectMethod diy_method.SelectMethod) {
+		}, g.GenerateModel("users"))
+		return g
+	},
+	generateDirPrefix + "dal_8": func(dir string) *gen.Generator {
+		g := gen.NewGenerator(gen.Config{
+			OutPath: dir + "/query",
+			Mode:    gen.WithDefaultQuery | gen.WithQueryInterface,
+
+			WithUnitTest: true,
+
+			FieldNullable:     true,
+			FieldCoverable:    true,
+			FieldWithIndexTag: true,
+		})
+		g.ApplyBasic(User{}, Post{}, Comment{})
+
 		return g
 	},
 }
@@ -223,4 +275,83 @@ func TestGenerate_expect(t *testing.T) {
 	)
 	g.ApplyBasic(customers, creditCards, banks)
 	g.Execute()
+}
+
+func Test_GenSkipImpl(t *testing.T) {
+	dir := ".gen/skip_impl_test"
+	os.RemoveAll(dir)
+	g := gen.NewGenerator(gen.Config{
+		OutPath: dir + "/query",
+		Mode:    gen.WithDefaultQuery | gen.WithQueryInterface,
+	})
+	g.UseDB(DB)
+	model := g.GenerateModel("users")
+	g.ApplyInterface(func(diy_method.TestSkipImpl) {}, model)
+	g.Execute()
+
+	queryFile := dir + "/query/users.gen.go"
+	content, err := os.ReadFile(queryFile)
+	if err != nil {
+		t.Fatalf("read generated file failed: %v", err)
+	}
+	str := string(content)
+	if !strings.Contains(str, "func (u userDo) NoSkipMethod(") {
+		t.Error("should generate NoSkipMethod implementation")
+	}
+	if strings.Contains(str, "func (u userDo) SkipMethod(") || strings.Contains(str, "func (u usersDo) SkipMethod(") {
+		t.Error("should not generate SkipMethod implementation for // gen:skip interface")
+	}
+}
+
+func Test_GenUseAny(t *testing.T) {
+	dir := ".gen/use_any_test"
+	os.RemoveAll(dir)
+	g := gen.NewGenerator(gen.Config{
+		OutPath: dir + "/query",
+		Mode:    gen.WithDefaultQuery | gen.WithQueryInterface,
+
+		UseAny: true,
+	})
+	g.UseDB(DB)
+	model := g.GenerateModel("users")
+	g.ApplyInterface(func(diy_method.TrimTest) {}, model)
+	g.Execute()
+
+	content, err := os.ReadFile(dir + "/query/users.gen.go")
+	if err != nil {
+		t.Fatalf("read generated file failed: %v", err)
+	}
+	str := string(content)
+	if strings.Contains(str, "interface{}") {
+		t.Error("should not contain interface{} when UseAny is enabled")
+	}
+	if !strings.Contains(str, "Scan(result any)") {
+		t.Error("should emit any in CRUD method signatures")
+	}
+	if !strings.Contains(str, "map[string]any") {
+		t.Error("should emit map[string]any for gen.M parameters")
+	}
+}
+
+func Test_GenVariadic(t *testing.T) {
+	dir := ".gen/variadic_test"
+	os.RemoveAll(dir)
+	g := gen.NewGenerator(gen.Config{
+		OutPath: dir + "/query",
+		Mode:    gen.WithDefaultQuery | gen.WithQueryInterface,
+	})
+	g.UseDB(DB)
+	model := g.GenerateModel("users")
+	g.ApplyInterface(func(diy_method.VariadicTest) {}, model)
+	g.Execute()
+
+	queryFile := dir + "/query/users.gen.go"
+	content, err := os.ReadFile(queryFile)
+	if err != nil {
+		t.Fatalf("read generated file failed: %v", err)
+	}
+	str := string(content)
+	if !strings.Contains(str, "VariadicMethod(ids ...int)") {
+		t.Error("should generate VariadicMethod implementation")
+	}
 }

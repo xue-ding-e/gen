@@ -26,20 +26,23 @@ func (dummyFieldParser) GetFieldGenType(*schema.Field) string { return "" }
 type QueryStructMeta struct {
 	db *gorm.DB
 
-	Generated       bool   // whether to generate db model
-	FileName        string // generated file name
-	S               string // the first letter(lower case)of simple Name (receiver)
-	QueryStructName string // internal query struct name
-	ModelStructName string // origin/model struct name
-	TableName       string // table name in db server
-	TableComment    string // table comment in db server
-	StructInfo      parser.Param
-	Fields          []*model.Field
-	Source          model.SourceCode
-	ImportPkgPaths  []string
-	ModelMethods    []*parser.Method // user custom method bind to db base struct
+	Generated             bool   // whether to generate db model
+	FileName              string // generated file name
+	S                     string // the first letter(lower case)of simple Name (receiver)
+	QueryStructName       string // internal query struct name
+	ModelStructName       string // origin/model struct name
+	TableName             string // table name in db server
+	MultilineTableComment bool   // indicator that table comment consists of multiple rows
+	TableComment          string // table comment in db server
+	StructInfo            parser.Param
+	Fields                []*model.Field
+	Source                model.SourceCode
+	ImportPkgPaths        []string
+	ModelMethods          []*parser.Method // user custom method bind to db base struct
 
 	interfaceMode bool
+
+	UseGenericMode bool // use generic mode
 }
 
 // parseStruct get all elements of struct with gorm's Parse, ignore unexported elements
@@ -65,6 +68,7 @@ func (b *QueryStructMeta) parseStruct(st interface{}) error {
 			ColumnName:    f.DBName,
 			CustomGenType: fp.GetFieldGenType(f),
 			ColumnComment: f.Comment,
+			Tag:           f.TagSettings,
 		}
 		if len(f.EmbeddedBindNames) > 1 {
 			gf.Name = strings.Join(f.EmbeddedBindNames, "")
@@ -72,7 +76,13 @@ func (b *QueryStructMeta) parseStruct(st interface{}) error {
 		if gf.ColumnComment == "" {
 			gf.ColumnComment = f.TagSettings["COMMENT"]
 		}
+
 		gf.MultilineComment = strings.Contains(gf.ColumnComment, "\n")
+
+		if gf.MultilineComment {
+			gf.ColumnComment = strings.Replace(gf.ColumnComment, "*/", "* /", -1)
+		}
+
 		b.appendOrUpdateField(gf)
 	}
 	for _, r := range ParseStructRelationShip(&stmt.Schema.Relationships) {
@@ -136,6 +146,18 @@ func (b *QueryStructMeta) appendOrUpdateField(f *model.Field) {
 
 func (b *QueryStructMeta) appendField(f *model.Field) { b.Fields = append(b.Fields, f) }
 
+func (b *QueryStructMeta) HasUniqueIndex() bool {
+	for _, f := range b.Fields {
+		if f == nil {
+			continue
+		}
+		if len(f.GORMTag[field.TagKeyGormUniqueIndex]) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // HasField check if BaseStruct has fields
 func (b *QueryStructMeta) HasField() bool { return len(b.Fields) > 0 }
 
@@ -163,7 +185,7 @@ func (b *QueryStructMeta) Relations() (result []field.Relation) {
 // StructComment struct comment
 func (b *QueryStructMeta) StructComment() string {
 	if b.TableComment != "" {
-		return b.TableComment
+		return strings.Replace(b.TableComment, "*/", "* /", -1)
 	}
 	if b.TableName != "" {
 		return fmt.Sprintf(`mapped from table <%s>`, b.TableName)
@@ -173,7 +195,15 @@ func (b *QueryStructMeta) StructComment() string {
 
 // QueryStructComment query struct comment
 func (b *QueryStructMeta) QueryStructComment() string {
+
 	if b.TableComment != "" {
+
+		if b.MultilineTableComment {
+			c := strings.Replace(b.TableComment, "*/", "* /", -1)
+
+			return fmt.Sprintf("/*\n%s %s\n*/", b.QueryStructName, c)
+		}
+
 		return fmt.Sprintf(`// %s %s`, b.QueryStructName, b.TableComment)
 	}
 
@@ -242,6 +272,12 @@ func (b QueryStructMeta) IfaceMode(on bool) *QueryStructMeta {
 	return &b
 }
 
+// GenericMode object mode
+func (b QueryStructMeta) GenericMode(on bool) *QueryStructMeta {
+	b.UseGenericMode = on
+	return &b
+}
+
 // ReturnObject return object in generated code
 func (b *QueryStructMeta) ReturnObject() string {
 	if b.interfaceMode {
@@ -255,25 +291,32 @@ func isStructType(data reflect.Value) bool {
 		(data.Kind() == reflect.Ptr && data.Elem().Kind() == reflect.Struct)
 }
 
-func pullRelationShip(cache map[string]bool, relationships []*schema.Relationship) []field.Relation {
+func pullRelationShip(cache map[string][]field.Relation, relationships []*schema.Relationship) []field.Relation {
 	if len(relationships) == 0 {
 		return nil
 	}
 	result := make([]field.Relation, len(relationships))
-	for i, relationship := range relationships {
-		var childRelations []field.Relation
+
+	for _, relationship := range relationships {
 		varType := strings.TrimLeft(relationship.Field.FieldType.String(), "[]*")
-		if !cache[varType] {
-			cache[varType] = true
-			childRelations = pullRelationShip(cache, append(append(append(append(
+		_, ok := cache[varType]
+		if !ok {
+			cache[varType] = []field.Relation{}
+			childRelations := pullRelationShip(cache, append(append(append(append(
 				make([]*schema.Relationship, 0, 4),
 				relationship.FieldSchema.Relationships.BelongsTo...),
 				relationship.FieldSchema.Relationships.HasOne...),
 				relationship.FieldSchema.Relationships.HasMany...),
 				relationship.FieldSchema.Relationships.Many2Many...),
 			)
+			cache[varType] = childRelations
 		}
-		result[i] = *field.NewRelationWithType(field.RelationshipType(relationship.Type), relationship.Name, varType, childRelations...)
+	}
+
+	for i, relationship := range relationships {
+		varType := strings.TrimLeft(relationship.Field.FieldType.String(), "[]*")
+		cached := cache[varType]
+		result[i] = *field.NewRelationWithType(field.RelationshipType(relationship.Type), relationship.Name, varType, cached...)
 	}
 	return result
 }
